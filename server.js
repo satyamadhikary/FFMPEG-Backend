@@ -1,15 +1,19 @@
 const express = require("express");
-const trimRoute = require("./routes/trim");
+const cors = require("cors");
 
 const app = express();
 
+app.use(cors());
 app.use(express.json({ limit: "50mb" }));
-app.use("/api", trimRoute);
+
+const trimRoutes = require("./routes/trim");
+app.use("/api", trimRoutes);
 
 app.get("/api/trim", (req, res) => {
-    res.send("FFMPEG Backend is running");
+  res.send("FFMPEG Backend is running");
 });
 
-app.listen(5000, () => {
-  console.log("Server running on port 5000");
+const PORT = 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
