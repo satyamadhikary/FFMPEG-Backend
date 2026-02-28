@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: ffmpeg-backend
+    env: node
+    buildCommand: |
+      apt-get update && apt-get install -y ffmpeg
+      pnpm install
+    startCommand: node server.js

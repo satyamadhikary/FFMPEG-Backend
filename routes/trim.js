@@ -5,34 +5,43 @@ const fs = require("fs");
 const path = require("path");
 const ffmpeg = require("fluent-ffmpeg");
 const crypto = require("crypto");
-const ffmpegPath = require("ffmpeg-static");
-// Set your FFmpeg path
-ffmpeg.setFfmpegPath(ffmpegPath);
 
-console.log("Path:", ffmpegPath);
-console.log("Exists:", fs.existsSync(ffmpegPath));
+// IMPORTANT:
+// Do NOT use ffmpeg-static
+// Do NOT set ffmpeg path
+// Render will install system ffmpeg via apt
 
 router.post("/trim", async (req, res) => {
   const requestId = crypto.randomBytes(8).toString("hex");
+
+  // Render only allows writing to /tmp
   const baseTemp = process.env.RENDER ? "/tmp" : path.join(__dirname, "temp");
   const tempDir = path.join(baseTemp, requestId);
 
   try {
     const { start, end, chunks } = req.body;
 
-    // Create the specific ID folder (recursive: true ensures 'temp' exists too)
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
+    if (!start && start !== 0 || !end || !chunks?.length) {
+      return res.status(400).json({
+        message: "Invalid request data",
+      });
     }
 
-    // 2. Download Chunks
+    // Create temp folder
+    fs.mkdirSync(tempDir, { recursive: true });
+
+    // 1️⃣ Download chunks
     const downloadedFiles = await Promise.all(
       chunks.map(async (chunk, i) => {
-        const url = chunk.filePath;
+        if (!chunk.filePath) {
+          throw new Error("Invalid chunk filePath");
+        }
+
         const filePath = path.join(tempDir, `chunk${i}.mp4`);
+
         const response = await axios({
           method: "GET",
-          url,
+          url: chunk.filePath,
           responseType: "stream",
         });
 
@@ -44,20 +53,21 @@ router.post("/trim", async (req, res) => {
         });
 
         return filePath;
-      }),
+      })
     );
 
-    // 3. Create concat file for FFmpeg
+    // 2️⃣ Create concat file
     const concatFilePath = path.join(tempDir, "concat.txt");
+
     const concatContent = downloadedFiles
-      .map((file) => `file '${file.replace(/\\/g, "/")}'`)
+      .map((file) => `file '${file}'`)
       .join("\n");
 
     fs.writeFileSync(concatFilePath, concatContent);
 
     const mergedPath = path.join(tempDir, "merged.mp4");
 
-    // 4. Merge chunks
+    // 3️⃣ Merge chunks
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(concatFilePath)
@@ -70,7 +80,7 @@ router.post("/trim", async (req, res) => {
 
     const outputPath = path.join(tempDir, "trimmed.mp4");
 
-    // 5. Trim merged video
+    // 4️⃣ Trim merged video
     await new Promise((resolve, reject) => {
       ffmpeg(mergedPath)
         .setStartTime(start)
@@ -81,38 +91,40 @@ router.post("/trim", async (req, res) => {
         .on("error", reject);
     });
 
-    // 6. Send file and Cleanup specific folder
+    // 5️⃣ Send file
     res.download(outputPath, "trimmed.mp4", (err) => {
       if (err) {
-        console.error(`Download error for ${requestId}:`, err);
+        console.error(`Download error (${requestId}):`, err);
       }
 
+      // Cleanup after short delay
       setTimeout(() => {
         try {
-          if (fs.existsSync(tempDir)) {
-            fs.rmSync(tempDir, { recursive: true, force: true });
-            console.log(`Successfully deleted session folder: ${requestId}`);
-          }
+          fs.rmSync(tempDir, { recursive: true, force: true });
+          console.log(`Cleaned up session: ${requestId}`);
         } catch (cleanupErr) {
-          console.error(
-            `Manual cleanup needed for ${tempDir}:`,
-            cleanupErr.message,
-          );
+          console.error("Cleanup failed:", cleanupErr.message);
         }
-      }, 500);
+      }, 1000);
     });
-  } catch (error) {
-    console.error("Trim process error:", error);
 
-    if (fs.existsSync(tempDir)) {
-      try {
+  } catch (error) {
+    console.error("Trim process error FULL:", error);
+    console.error("Stack:", error.stack);
+
+    // Cleanup on failure
+    try {
+      if (fs.existsSync(tempDir)) {
         fs.rmSync(tempDir, { recursive: true, force: true });
-      } catch (e) {
-        console.error("Initial catch cleanup failed:", e.message);
       }
+    } catch (cleanupErr) {
+      console.error("Cleanup after error failed:", cleanupErr.message);
     }
 
-    res.status(500).send("Failed to trim video");
+    res.status(500).json({
+      message: "Failed to trim video",
+      error: error.message,
+    });
   }
 });
 
