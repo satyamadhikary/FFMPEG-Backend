@@ -1,56 +1,118 @@
 const express = require("express");
 const router = express.Router();
-const ffmpeg = require("fluent-ffmpeg");
 const axios = require("axios");
-const stream = require("stream");
-const { PassThrough } = require("stream");
+const fs = require("fs");
+const path = require("path");
+const ffmpeg = require("fluent-ffmpeg");
+const crypto = require("crypto");
+const ffmpegPath = require("ffmpeg-static");
+// Set your FFmpeg path
+ffmpeg.setFfmpegPath(ffmpegPath);
 
-ffmpeg.setFfmpegPath("/usr/bin/ffmpeg");
+console.log("Path:", ffmpegPath);
+console.log("Exists:", fs.existsSync(ffmpegPath));
 
 router.post("/trim", async (req, res) => {
+  const requestId = crypto.randomBytes(8).toString("hex");
+  const baseTemp = process.env.RENDER ? "/tmp" : path.join(__dirname, "temp");
+  const tempDir = path.join(baseTemp, requestId);
+
   try {
     const { start, end, chunks } = req.body;
-    if (!chunks || !chunks.length) return res.status(400).send("No video chunks provided");
 
-    // Prepare array of PassThrough streams
-    const inputStreams = await Promise.all(
-      chunks.map(async (chunk) => {
+    // Create the specific ID folder (recursive: true ensures 'temp' exists too)
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+
+    // 2. Download Chunks
+    const downloadedFiles = await Promise.all(
+      chunks.map(async (chunk, i) => {
+        const url = chunk.filePath;
+        const filePath = path.join(tempDir, `chunk${i}.mp4`);
         const response = await axios({
-          url: chunk.filePath,
           method: "GET",
+          url,
           responseType: "stream",
         });
-        const pass = new PassThrough();
-        response.data.pipe(pass);
-        return pass;
-      })
+
+        await new Promise((resolve, reject) => {
+          const writer = fs.createWriteStream(filePath);
+          response.data.pipe(writer);
+          writer.on("finish", resolve);
+          writer.on("error", reject);
+        });
+
+        return filePath;
+      }),
     );
 
-    // Initialize FFmpeg
-    let command = ffmpeg();
+    // 3. Create concat file for FFmpeg
+    const concatFilePath = path.join(tempDir, "concat.txt");
+    const concatContent = downloadedFiles
+      .map((file) => `file '${file.replace(/\\/g, "/")}'`)
+      .join("\n");
 
-    // Add each input stream
-    inputStreams.forEach((s) => command = command.input(s));
+    fs.writeFileSync(concatFilePath, concatContent);
 
-    // Build concat filter string
-    const n = inputStreams.length;
-    const inputs = [...Array(n).keys()].map(i => `[${i}:v:0][${i}:a:0]`).join('');
-    const filter = `${inputs}concat=n=${n}:v=1:a=1[outv][outa]`;
+    const mergedPath = path.join(tempDir, "merged.mp4");
 
-    command
-      .complexFilter([filter])
-      .outputOptions([`-map [outv]`, `-map [outa]`, `-ss ${start}`, `-to ${end}`, "-preset veryfast"])
-      .format("mp4")
-      .on("start", (cmd) => console.log("FFmpeg command:", cmd))
-      .on("error", (err) => {
-        console.error("Trim error:", err);
-        if (!res.headersSent) res.status(500).send("Failed to trim video");
-      })
-      .on("end", () => console.log("Trim/merge complete"))
-      .pipe(res, { end: true }); // Pipe directly to response
-  } catch (err) {
-    console.error("Trim error:", err);
-    if (!res.headersSent) res.status(500).send("Failed to trim video");
+    // 4. Merge chunks
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(concatFilePath)
+        .inputOptions(["-f concat", "-safe 0"])
+        .outputOptions("-c copy")
+        .save(mergedPath)
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    const outputPath = path.join(tempDir, "trimmed.mp4");
+
+    // 5. Trim merged video
+    await new Promise((resolve, reject) => {
+      ffmpeg(mergedPath)
+        .setStartTime(start)
+        .setDuration(end - start)
+        .outputOptions("-c copy")
+        .save(outputPath)
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    // 6. Send file and Cleanup specific folder
+    res.download(outputPath, "trimmed.mp4", (err) => {
+      if (err) {
+        console.error(`Download error for ${requestId}:`, err);
+      }
+
+      setTimeout(() => {
+        try {
+          if (fs.existsSync(tempDir)) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+            console.log(`Successfully deleted session folder: ${requestId}`);
+          }
+        } catch (cleanupErr) {
+          console.error(
+            `Manual cleanup needed for ${tempDir}:`,
+            cleanupErr.message,
+          );
+        }
+      }, 500);
+    });
+  } catch (error) {
+    console.error("Trim process error:", error);
+
+    if (fs.existsSync(tempDir)) {
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch (e) {
+        console.error("Initial catch cleanup failed:", e.message);
+      }
+    }
+
+    res.status(500).send("Failed to trim video");
   }
 });
 
