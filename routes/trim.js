@@ -6,11 +6,6 @@ const path = require("path");
 const ffmpeg = require("fluent-ffmpeg");
 const crypto = require("crypto");
 
-// IMPORTANT:
-// Do NOT use ffmpeg-static
-// Do NOT set ffmpeg path
-// Render will install system ffmpeg via apt
-
 router.post("/trim", async (req, res) => {
   const requestId = crypto.randomBytes(8).toString("hex");
 
@@ -30,7 +25,7 @@ router.post("/trim", async (req, res) => {
     // Create temp folder
     fs.mkdirSync(tempDir, { recursive: true });
 
-    // 1️⃣ Download chunks
+    // Download chunks
     const downloadedFiles = await Promise.all(
       chunks.map(async (chunk, i) => {
         if (!chunk.filePath) {
@@ -56,7 +51,7 @@ router.post("/trim", async (req, res) => {
       })
     );
 
-    // 2️⃣ Create concat file
+    // Create concat file
     const concatFilePath = path.join(tempDir, "concat.txt");
 
     const concatContent = downloadedFiles
@@ -67,7 +62,7 @@ router.post("/trim", async (req, res) => {
 
     const mergedPath = path.join(tempDir, "merged.mp4");
 
-    // 3️⃣ Merge chunks
+    // Merge chunks
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(concatFilePath)
@@ -80,7 +75,7 @@ router.post("/trim", async (req, res) => {
 
     const outputPath = path.join(tempDir, "trimmed.mp4");
 
-    // 4️⃣ Trim merged video
+    // Trim merged video
     await new Promise((resolve, reject) => {
       ffmpeg(mergedPath)
         .setStartTime(start)
@@ -91,7 +86,7 @@ router.post("/trim", async (req, res) => {
         .on("error", reject);
     });
 
-    // 5️⃣ Send file
+    // Send file
     res.download(outputPath, "trimmed.mp4", (err) => {
       if (err) {
         console.error(`Download error (${requestId}):`, err);
